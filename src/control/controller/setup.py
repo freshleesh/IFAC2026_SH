@@ -26,13 +26,10 @@ setup(
         "console_scripts": [
             "controller_manager = controller.controller_manager:main",
             "simple_pp = controller.simple_pp:main",
-            "stanley = controller.stanley:main",
-            "stanley_plot = controller.stanley_plot:main",
             "gap_follow_node = controller.gapfollow:main",
             "wall_follow_node = controller.wallfollow:main",
-            "lqr = controller.lqr:main",
             'fc_node = controller.friction_circle_controller:main',
-            'friction_test = controller.friction_test:main',
+            'pp_heading_controller = controller.pp_heading_controller:main',
         ],
     },
 )

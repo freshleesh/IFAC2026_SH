@@ -117,19 +117,16 @@ class CenterlineExtractor(Node):
         map_origin_x = map_data['origin'][0]
         map_origin_y = map_data['origin'][1]
         occupied_thresh = map_data.get('occupied_thresh', 0.65)
+        threshold = int(occupied_thresh * 255)
+        kernel = np.ones((9, 9), np.uint8)
 
-        # [맵이름]_modi.png가 있으면 우선 사용: 경로 생성용으로 수정한 이미지를
-        # 파일명 교체 없이 쓰기 위함 (yaml의 image:는 로컬라이제이션용 원본 유지)
-        modi_path = os.path.join(self.map_dir, f'{self.map_name}_modi.png')
-        use_modi = os.path.exists(modi_path)
-        if use_modi:
-            img_path = modi_path
-            self.get_logger().info(f'[CenterlineExtractor] Using modified map image: {modi_path}')
-        else:
-            img_path = os.path.join(self.map_dir, map_data['image'])
-        img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+        # centerline(스켈레톤)과 wall_boundary는 원본 [맵이름].png 기준으로 추출한다.
+        # [맵이름]_modi.png는 트랙 폭(w_tr) 계산에만 사용 → optimizer가 따르는
+        # 가짜 벽 제약(=경로 생성)에만 _modi가 반영되고, 중심선/경계는 실제 벽을 유지한다.
+        orig_path = os.path.join(self.map_dir, map_data['image'])
+        img = cv2.imread(orig_path, cv2.IMREAD_GRAYSCALE)
         if img is None:
-            self.get_logger().error(f'Failed to load map image: {img_path}')
+            self.get_logger().error(f'Failed to load map image: {orig_path}')
             return False
 
         # Flip Y (image top-left origin → ROS bottom-left origin)
@@ -137,21 +134,19 @@ class CenterlineExtractor(Node):
         img = cv2.flip(img, 0)
         #self._show_debug_plot('Step 1: Loaded & Flipped Original Map', img)
 
-        # 2. Binarize
-        threshold = int(occupied_thresh * 255)
+        # 2. Binarize (원본 = 중심선/경계용)
         bw = np.where(img > threshold, 255, 0).astype(np.uint8)
         #self._show_debug_plot('Step 2: Binarized Map', bw)
 
         # 3. Morphological opening (noise removal)
-        kernel = np.ones((9, 9), np.uint8)
         opening = cv2.morphologyEx(bw, cv2.MORPH_OPEN, kernel, iterations=1)
         #self._show_debug_plot('Step 3: Morphological Opening (Noise Removal)', opening)
 
-        # 4. Skeletonize
+        # 4. Skeletonize (원본 기준)
         skeleton = skeletonize(opening, method='lee')
         skeleton_img = (skeleton * 255).astype(np.uint8)
 
-        self.get_logger().info(f'[CenterlineExtractor] Skeleton extracted')
+        self.get_logger().info(f'[CenterlineExtractor] Skeleton extracted (from original image)')
         #self._show_debug_plot('Step 4: Skeletonized Map', skeleton_img)
 
         # 5. Extract centerline (shortest closed contour)
@@ -188,43 +183,47 @@ class CenterlineExtractor(Node):
                 centerline_meter = np.flip(centerline_meter, axis=0)
             self.get_logger().info('[CenterlineExtractor] Centerline direction: CCW')
 
-        # 9. Extract wall boundaries (inner/outer contours from binary image)
-        # _modi 이미지의 벽 → 센터라인 폭(w_tr) 계산용 (optimizer가 따르는 가짜 벽 제약)
-        bound_right_m, bound_left_m = self._extract_wall_boundaries(
+        # 9. Wall boundaries (실제 벽 = 원본 이미지) — boundary CSV/마커/시각화/검증용.
+        # boundary CSV(런타임 d_left/d_right, 회피 스플라인 클램핑, check_traj 검증)는
+        # 반드시 실제 벽 기준이어야 한다.
+        bound_right_real, bound_left_real = self._extract_wall_boundaries(
             opening, centerline_meter, map_resolution,
             map_origin_x, map_origin_y)
 
-        # boundary CSV(런타임 d_left/d_right, 회피 스플라인 클램핑, check_traj 검증)는
-        # 반드시 실제 벽 기준이어야 함 → _modi 사용 시 원본 이미지에서 별도 추출
+        # 9b. 폭(w_tr) 계산용 벽: [맵이름]_modi.png가 있으면 _modi 벽을 사용한다.
+        # _modi 벽으로 폭을 좁히면 optimizer(=경로)가 그 가짜 벽을 따라가게 된다.
+        # _modi가 없으면 실제(원본) 벽으로 폭을 계산한다.
+        modi_path = os.path.join(self.map_dir, f'{self.map_name}_modi.png')
+        use_modi = os.path.exists(modi_path)
         if use_modi:
-            orig_img = cv2.imread(os.path.join(self.map_dir, map_data['image']),
-                                  cv2.IMREAD_GRAYSCALE)
-            if orig_img is None:
+            modi_img = cv2.imread(modi_path, cv2.IMREAD_GRAYSCALE)
+            if modi_img is None:
                 self.get_logger().error(
-                    f'Failed to load original map image: {map_data["image"]}')
+                    f'Failed to load modified map image: {modi_path}')
                 return False
-            orig_img = cv2.flip(orig_img, 0)
-            orig_bw = np.where(orig_img > threshold, 255, 0).astype(np.uint8)
-            opening_orig = cv2.morphologyEx(orig_bw, cv2.MORPH_OPEN, kernel, iterations=1)
-            bound_right_real, bound_left_real = self._extract_wall_boundaries(
-                opening_orig, centerline_meter, map_resolution,
+            modi_img = cv2.flip(modi_img, 0)
+            modi_bw = np.where(modi_img > threshold, 255, 0).astype(np.uint8)
+            opening_modi = cv2.morphologyEx(modi_bw, cv2.MORPH_OPEN, kernel, iterations=1)
+            bound_right_w, bound_left_w = self._extract_wall_boundaries(
+                opening_modi, centerline_meter, map_resolution,
                 map_origin_x, map_origin_y)
             self.get_logger().info(
-                '[CenterlineExtractor] Boundary CSVs from ORIGINAL image '
-                '(widths from _modi image)')
+                '[CenterlineExtractor] Track widths from _modi image '
+                '(centerline & boundaries from ORIGINAL image)')
         else:
-            bound_right_real, bound_left_real = bound_right_m, bound_left_m
+            opening_modi = opening
+            bound_right_w, bound_left_w = bound_right_real, bound_left_real
 
-        # 10. Track width from distance transform
-        if bound_right_m is not None and bound_left_m is not None:
+        # 10. Track width (폭 계산용 벽 기준 = _modi if exists, else 원본)
+        if bound_right_w is not None and bound_left_w is not None:
             w_right, w_left = self._compute_track_widths_from_bounds(
-                centerline_meter, bound_right_m, bound_left_m)
+                centerline_meter, bound_right_w, bound_left_w)
             self.get_logger().info(
                 f'Asymmetric widths: w_right {w_right.min():.2f}~{w_right.max():.2f}, '
                 f'w_left {w_left.min():.2f}~{w_left.max():.2f}')
         else:
-            # Fallback to distance transform (symmetric)
-            dist_transform = cv2.distanceTransform(opening, cv2.DIST_L2, 5)
+            # Fallback to distance transform (symmetric, _modi 기준)
+            dist_transform = cv2.distanceTransform(opening_modi, cv2.DIST_L2, 5)
             track_widths = self._compute_track_widths(
                 centerline_smooth, dist_transform, map_resolution)
             w_right = track_widths

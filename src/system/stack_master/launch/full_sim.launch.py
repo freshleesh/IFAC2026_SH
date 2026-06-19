@@ -50,8 +50,8 @@ def _build(context: LaunchContext, *_args, **_kwargs):
 
     if mode not in ("timetrial", "overtake", "avoid", "mpcc"):
         raise ValueError(f"mode must be 'timetrial' / 'overtake' / 'avoid' / 'mpcc', got {mode!r}")
-    if controller not in ("simple_pp", "mppi"):
-        raise ValueError(f"controller must be 'simple_pp' or 'mppi', got {controller!r}")
+    if controller not in ("pp_heading", "simple_pp", "mppi"):
+        raise ValueError(f"controller must be 'pp_heading' / 'simple_pp' / 'mppi', got {controller!r}")
 
     # 'avoid' = 'overtake' alias — 정적 장애물 회피 의도 명시. 코드 동작 동일.
     if mode == "avoid":
@@ -60,6 +60,7 @@ def _build(context: LaunchContext, *_args, **_kwargs):
     # mode=mpcc 는 controller 인자보다 우선 (기존 mpcc 분기 유지).
     is_mpcc = (mode == "mpcc")
     use_mppi = (not is_mpcc) and (controller == "mppi")
+    use_pp_heading = (not is_mpcc) and (controller == "pp_heading")
     # MPCC mode: state_machine 은 GB_TRACK 강제 (mpc 가 자체 reference 추종).
     timetrials_only = (mode == "timetrial") or is_mpcc
     force_gbtrack = (mode == "timetrial") or is_mpcc
@@ -189,7 +190,21 @@ def _build(context: LaunchContext, *_args, **_kwargs):
     )])
     actions.append(sm_node)
 
-    if not is_mpcc and not use_mppi:
+    if use_pp_heading:
+        # ── pp_heading_controller (현행 메인: PP + friction-circle + heading PID) ─
+        # sub /car_state/odom, /local_waypoints  ·  pub mux input nav_1
+        pp_heading_yaml = os.path.join(
+            get_package_share_directory("controller"), "config", "pp_heading_params.yaml"
+        )
+        controller_node = TimerAction(period=7.0, actions=[Node(
+            package="controller",
+            executable="pp_heading_controller",
+            name="pp_heading_controller",
+            parameters=[pp_heading_yaml, {"drive_topic": "/vesc/high_level/ackermann_cmd"}],
+            output="screen",
+        )])
+        actions.append(controller_node)
+    elif not is_mpcc and not use_mppi:
         # ── simple_pp (minimal pure-pursuit, vx_mps 그대로) ────────────
         # 기존 controller_manager (L1 + lat_err/accel_lim 후처리) 가 vx_mps 를
         # 깎는 문제 디버깅용 교체. middle_level_mac 과 동일 노드/파라미터.
@@ -333,8 +348,8 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("racecar_version", default_value="SIM"),
         DeclareLaunchArgument("mode", default_value="timetrial",
                               description="timetrial | overtake | mpcc"),
-        DeclareLaunchArgument("controller", default_value="simple_pp",
-                              description="simple_pp | mppi (mode=mpcc 시 무시)"),
+        DeclareLaunchArgument("controller", default_value="pp_heading",
+                              description="pp_heading | simple_pp | mppi (mode=mpcc 시 무시)"),
         DeclareLaunchArgument("mppi_params_file", default_value="",
                               description="mppi yaml override. 빈 문자열이면 mppi_bringup/config/params_sim_mac.yaml."),
         DeclareLaunchArgument("mppi_wpt_path", default_value="",

@@ -1,0 +1,72 @@
+pp_heading_controller:
+  ros__parameters:
+
+    # ── Topic ───────────────────────────────────────────────────────────────
+    # 드라이브 명령 토픽 (IFAC mux input). state_machine/mux 구성에 맞춰 조정.
+    drive_topic:        "/vesc/high_level/ackermann_cmd_mux/input/nav_1"
+
+    # ── Vehicle ─────────────────────────────────────────────────────────────
+    wheelbase_L:        0.33    # [m]
+    delta_max:          0.41    # [rad]
+    v_min:              0.5     # [m/s]
+    v_max:              8.0     # [m/s]
+    v_min_for_ik:       0.5     # [m/s]  마찰원/크로스트랙 속도 하한
+    control_rate_hz:    50.0
+
+    # ── Adaptive lookahead ───────────────────────────────────────────────────
+    # ld = clip(k_v·vx / (1 + k_k·|κ_eff|), ld_min, ld_max),  κ_eff=max(현재,전방)
+    # ld 짧음 → 직선 추종 강함/커팅↓, 길면 코너 부드러움.
+    # (직선 추종은 이제 cross-track 항이 ld와 무관하게 보강하므로 코너 위주로 잡으면 됨)
+    ld_min:             1.2     # [m]
+    ld_max:             2.5     # [m]
+    k_v:                0.3     # [s]      vx → ld 이득
+    k_k:                10.0    # [m/rad]  코너 곡률 → ld 감쇠
+
+    # ── Friction circle ──────────────────────────────────────────────────────
+    a_total_max:        6.7     # [m/s²]  μ·g (실측 CCW 6.68)
+    a_long_max:         2.0     # [m/s²]  최대 가속도 (drive-wheel traction)
+
+    # ── Understeer feedforward ───────────────────────────────────────────────
+    # δ_us = k_understeer · a_lat_geo  (a_lat_geo = vx²·κ_geo, 마찰 클램프 후)
+    # 코너에서 슬립 보정. 너무 키우면 안쪽으로 커팅(저속 타이트 코너도 a_lat 큼).
+    k_understeer:       0.010   # [rad/(m/s²)]  0 = off
+
+    # ── Yaw-rate damping (옵션, 기본 OFF — 헤딩 PID가 대체) ──────────────────
+    # δ_damp = −k_yaw_damp · (omega_z − vx·κ_geo).  PID 쓰면 0 권장.
+    k_yaw_damp:         0.0     # [s]  0 = off
+
+    # ── Heading-error PID (lookahead 베어링 e_psi 보정) ─────────────────────
+    # δ_pid = Kp·e_psi + Ki·∫e_psi + Kd·ė(필터드),   e_psi = atan2(ly, lx)
+    #   Kp → 라인에 빠르게 붙음,  Kd → 그로 인한 오버슈트/진동 감쇠.
+    # ★ Kd가 쓸모있는 이유: ė를 d_tau로 저역통과 필터링 → raw 50Hz 노이즈 제거.
+    #   (예전엔 raw ė라 Kd=0 → P만 남아 헤어핀 진동했음)
+    # 튜닝 순서:
+    #   1. Ki=Kd=0, Kp만 0.4 → 0.6 → 0.8 올려 라인 붙는 속도 확인
+    #   2. 진동/오버슈트 생기면 Kd 0.05 → 0.10 → 0.15 올려 감쇠
+    #   3. (Kd 올렸는데 굼뜨면 d_tau 낮춤 0.05→0.03 / 노이즈로 떨면 높임)
+    #   4. 코너 정상오차 남으면 Ki 0.05~0.1 소량
+    heading_kp:         0.4     # [-]
+    heading_ki:         0.0     # [1/s]
+    heading_kd:         0.05    # [s]
+    heading_i_max:      0.2     # [rad]  Ki 항 클램프
+    heading_d_tau:      0.05    # [s]    미분 저역통과 시정수
+
+    # ── Speed ────────────────────────────────────────────────────────────────
+    # a_long_budget = min(a_long_max, √(a_total_max² − (v_wp²·κ_now)²))
+    # v_ref = min( raceline vx_mps, √(a_lat_corner/|κ|) )  in 제동 윈도우
+    # v_cmd = min(v_ref, vx + a_long_budget·align·t_cmd_horizon)  [가속]
+    # v_cmd = v_ref                                                [감속]
+    a_brake_max:        3.5     # [m/s²]  제동거리 윈도우 크기
+    t_cmd_horizon:      0.3     # [s]     가속 명령 horizon
+
+    # ── Curvature-limited corner speed cap ───────────────────────────────────
+    # v ≤ √(a_lat_corner / |κ|).  ★ 고속 코너 언더스티어의 실제 노브.
+    # 박으면 낮춤(2.0 → 1.5). 코너가 너무 굼뜨면 올림(a_total_max 아래 유지).
+    a_lat_corner:       2.0     # [m/s²]
+
+    # ── Heading-alignment acceleration gate ──────────────────────────────────
+    # yaw_err = |차 헤딩 − 경로 접선|.  미정렬 시 가속 억제("펴지기 전 액셀 X").
+    #   |yaw_err| ≤ yaw_gate_min → 가속 100% / ≥ yaw_gate_max → 0% / 사이 선형.
+    # 탈출 시 일찍 가속해 불안정 → yaw_gate_max 낮춤. 너무 안 나가면 높임.
+    yaw_gate_min:       0.05    # [rad]  ~3°  이하: 가속 풀 허용
+    yaw_gate_max:       0.40    # [rad]  ~23° 이상: 가속 차단
