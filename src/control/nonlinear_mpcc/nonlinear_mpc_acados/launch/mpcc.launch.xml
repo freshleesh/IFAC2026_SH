@@ -1,0 +1,68 @@
+<launch>
+  <!--
+    mpcc.launch.xml
+    ====================
+    Nonlinear MPCC controller + global waypoints publisher (ppc.launch.xml mirror).
+
+    Run AFTER:
+      sim  : ros2 launch stack_master low_level.launch.xml sim:=true map:=<name>
+      real : ros2 launch stack_master middle_level.launch.xml map:=<name>
+
+    Usage:
+      sim  : ros2 launch nonlinear_mpc_acados mpcc.launch.xml map:=<name> sim:=true
+      real : ros2 launch nonlinear_mpc_acados mpcc.launch.xml map:=<name>
+
+    Notes:
+      - Default speed cap = 4 m/s (yaml). 첫 lap 은 더 낮춰서 검증 권장.
+      - acados codegen 첫 launch 약 30s. 이후 cache 사용.
+      - LB joypad 버튼으로 즉시 수동 복귀 (그들 safety convention).
+  -->
+
+  <arg name="map"    description="Map name (folder in stack_master/maps/)"/>
+  <arg name="sim"    default="false" description="true: sim (/vesc/odom from gym_bridge); false: real (remap /vesc/odom → /car_state/odom)"/>
+  <arg name="config" default="$(find-pkg-share nonlinear_mpc_acados)/config/ddrx_unified_params.yaml"/>
+  <arg name="track_source" default="raceline" description="'centerline' or 'raceline' (default raceline — IQP-optimized line)"/>
+  <arg name="use_gp_residual" default="false" description="Phase D GP residual wrap (requires PYTHONPATH=$HOME/l4acados/src)"/>
+  <arg name="enable_sim_reset" default="$(var sim)" description="/sim/initialpose publish on stuck (true for sim, false for real car safety)"/>
+  <arg name="detector" default="true" description="LiDAR scan → /external_obstacles 장애물 감지 노드 (2D /scan 기반)"/>
+  <arg name="scan_topic" default="/scan" description="detector 입력 LaserScan 토픽"/>
+
+  <!-- Global waypoints publisher (loads stack_master/maps/<map>/centerline.csv + global_waypoints.csv) -->
+  <node pkg="planner" exec="waypoint_publisher" name="waypoint_publisher" output="screen">
+    <param name="map_name" value="$(var map)"/>
+  </node>
+
+  <!-- Nonlinear MPCC controller.
+       sim : gym_bridge publishes /vesc/odom directly (GT), no remap needed.
+       real: VESC /vesc/odom wheel-only (drifts) → use EKF /car_state/odom via remap. -->
+  <group if="$(var sim)">
+    <node pkg="nonlinear_mpc_acados" exec="mpc_node" name="mpc_node" output="screen">
+      <param from="$(var config)"/>
+      <param name="track_name" value="$(var map)"/>
+      <param name="track_source" value="$(var track_source)"/>
+      <param name="use_gp_residual" value="$(var use_gp_residual)"/>
+      <param name="enable_sim_reset" value="$(var enable_sim_reset)"/>
+    </node>
+  </group>
+  <group unless="$(var sim)">
+    <node pkg="nonlinear_mpc_acados" exec="mpc_node" name="mpc_node" output="screen">
+      <param from="$(var config)"/>
+      <param name="track_name" value="$(var map)"/>
+      <param name="track_source" value="$(var track_source)"/>
+      <param name="use_gp_residual" value="$(var use_gp_residual)"/>
+      <param name="enable_sim_reset" value="$(var enable_sim_reset)"/>
+      <remap from="/vesc/odom" to="/car_state/odom"/>
+    </node>
+  </group>
+
+  <!-- LiDAR 장애물 감지 → /external_obstacles (mpc_node 회피 입력).
+       /map(occupancy) 기반 벽 erosion으로 벽 리턴 제외 → 클러스터링 → persist.
+       끄려면 detector:=false -->
+  <group if="$(var detector)">
+    <node pkg="nonlinear_mpc_acados" exec="scan_obstacle_detector" name="scan_obstacle_detector" output="screen">
+      <param name="scan_topic" value="$(var scan_topic)"/>
+      <param name="odom_topic" value="/car_state/odom"/>
+    </node>
+  </group>
+
+</launch>

@@ -1,0 +1,42 @@
+<?xml version="1.0"?>
+<launch>
+  <!--
+    bo.launch.xml — Bayesian Optimization sweep (TuRBO + ConstrainedEI).
+    Tunes q_*_scale_live in ddrx_unified_params.yaml against the sim.
+    ====================================================================
+    ★ SIM ONLY — spawns f1tenth_gym per evaluation. NEVER run on the car.
+    ★ 결과 자동반영: 끝나면 best_params 를 ddrx_unified_params.yaml 에 write-back
+      (q_*_scale_live 갱신). 사람이 따로 옮길 필요 없음.
+
+    Usage (ROS + ws 를 source 한 셸에서):
+      ros2 launch nonlinear_mpc_acados bo.launch.xml map:=<map>
+      ros2 launch nonlinear_mpc_acados bo.launch.xml map:=<map> n_calls:=8 n_initial:=4 n_laps:=2   # 짧게
+
+    주의: BO 는 q_* 가중치만 튜닝. dyn_mu / 제동값 / A_MIN_DYN 은 건드리지 않음.
+          물리/제동(C1·C2) 고친 뒤에 돌릴 것.
+  -->
+
+  <arg name="map"                            description="Map name (stack_master/maps/)"/>
+  <arg name="sim"       default="true"       description="SIM ONLY. true 가 아니면 거부."/>
+  <arg name="n_calls"   default="30"         description="BO iteration 수"/>
+  <arg name="n_initial" default="8"          description="Sobol 초기 샘플 수"/>
+  <arg name="n_laps"    default="3"          description="eval 당 랩 수"/>
+
+  <!-- scripts/ 는 share 에 설치 안 되므로 source 트리에서 직접 (repo 관례: find-pkg-prefix + ../../src) -->
+  <let name="bo_script"
+       value="$(find-pkg-prefix nonlinear_mpc_acados)/../../src/creating_autonomous_car/nonlinear_mpc_acados/scripts/bo_sweep_turbo.py"/>
+
+  <!-- ===== SIM-ONLY 가드 ===== -->
+  <log message="==================================================================&#10;bo.launch 는 SIM 전용입니다 (gym 스폰). sim:=true 로만 실행하세요. 거부됨.&#10;=================================================================="
+       unless="$(var sim)"/>
+
+  <!-- ===== BO sweep (sim) ===== -->
+  <executable if="$(var sim)" output="screen"
+              cmd="python3 $(var bo_script) --map $(var map) --n_calls $(var n_calls) --n_initial $(var n_initial) --n_laps $(var n_laps)">
+    <env name="ACADOS_SOURCE_DIR"   value="$(env HOME)/acados"/>
+    <env name="LD_LIBRARY_PATH"     value="$(env HOME)/acados/lib:$(env LD_LIBRARY_PATH '')"/>
+    <env name="RMW_IMPLEMENTATION"  value="rmw_cyclonedds_cpp"/>
+    <env name="CYCLONEDDS_URI"      value="file://$(env HOME)/cyclonedds_laptop.xml"/>
+  </executable>
+
+</launch>

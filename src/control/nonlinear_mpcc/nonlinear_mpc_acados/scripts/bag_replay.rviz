@@ -1,0 +1,133 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+    Property Tree Widget:
+      Expanded: ~
+      Splitter Ratio: 0.55
+    Tree Height: 700
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Enabled: true
+      Name: Grid
+      Plane Cell Count: 40
+      Value: true
+    - Class: rviz_default_plugins/TF
+      Enabled: false
+      Name: TF
+      Value: false
+    - Class: rviz_default_plugins/Map
+      Enabled: true
+      Name: Map
+      Topic:
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /map
+      Update Topic:
+        Value: /map_updates
+      Value: true
+    - Channel Name: intensity
+      Class: rviz_default_plugins/LaserScan
+      Color: 255; 255; 255
+      Color Transformer: Intensity
+      Enabled: true
+      Name: Scan
+      Size (m): 0.03
+      Style: Points
+      Topic:
+        Reliability Policy: Best Effort
+        Value: /scan
+      Value: true
+    - Class: rviz_default_plugins/Odometry
+      Covariance:
+        Value: false
+      Enabled: true
+      Keep: 1
+      Name: CarOdom
+      Shape:
+        Color: 255; 25; 0
+        Shaft Length: 0.3
+        Shaft Radius: 0.05
+        Head Length: 0.15
+        Head Radius: 0.1
+      Topic:
+        Value: /car_state/odom
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: MPC Prediction
+      Topic:
+        Value: /mpc_trajectory
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Track Bounds
+      Topic:
+        Value: /boundary_marker
+      Value: true
+    - Class: rviz_default_plugins/PoseArray
+      Color: 255; 170; 0
+      Enabled: true
+      Name: Obstacles
+      Shape: Axes
+      Topic:
+        Value: /external_obstacles
+      Value: true
+    - Class: rviz_default_plugins/Path
+      Color: 25; 255; 0
+      Enabled: true
+      Name: Reference
+      Topic:
+        Value: /reference_path
+      Value: true
+    - Class: rviz_default_plugins/Path
+      Color: 130; 130; 130
+      Enabled: true
+      Name: Center
+      Topic:
+        Value: /center_path
+      Value: true
+    - Class: rviz_default_plugins/Path
+      Color: 85; 87; 83
+      Enabled: false
+      Name: Left
+      Topic:
+        Value: /left_path
+      Value: false
+    - Class: rviz_default_plugins/Path
+      Color: 85; 87; 83
+      Enabled: false
+      Name: Right
+      Topic:
+        Value: /right_path
+      Value: false
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: map
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Measure
+    - Class: rviz_default_plugins/PublishPoint
+      Single click: true
+      Topic:
+        Value: /clicked_point
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 25
+      Name: Current View
+      Pitch: 1.57
+      Target Frame: <Fixed Frame>
+      Yaw: 0
+    Saved: ~
+Window Geometry:
+  Height: 1000
+  Width: 1600

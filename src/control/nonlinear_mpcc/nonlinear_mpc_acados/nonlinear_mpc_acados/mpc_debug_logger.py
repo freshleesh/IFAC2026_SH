@@ -30,18 +30,23 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
 
 from std_msgs.msg import Float32MultiArray, Float64, Bool, Int32
-from nav_msgs.msg import Path
+from nav_msgs.msg import Path, Odometry
 from geometry_msgs.msg import PoseStamped
 from visualization_msgs.msg import MarkerArray
 
 
 # Must match Nonlinear_MPC_node.DBG_FIELDS order (ROS1 source of truth).
+# C-1 추가: kappa_abs/signed + B 의 q_*_scale (16~21) — MLP 학습 데이터 용도.
 DBG_FIELDS = [
     "v_cmd", "steer_cmd", "v_actual",
     "car_x", "car_y", "car_yaw",
     "current_s", "near_idx", "ref_v",
     "n_obs_in", "sel_dmin", "sel_x", "sel_y",
     "side_pref", "opti_value", "solve_ms",
+    # C-1 MLP 학습용 추가 필드
+    "kappa_abs", "kappa_signed",
+    "q_cte_scale", "q_lag_scale", "q_v_scale", "q_drate_scale",
+    "v_max_cost",  # mpc.v_max (cost target). auto_step 이 동적 변경.
 ]
 
 LAP_JUMP_THRESHOLD = 5.0  # current_s big-to-small drop triggers lap +1
@@ -59,7 +64,14 @@ class MPCDebugLogger(Node):
         self.last_solve_ms = float("nan")
         self.last_cost = float("nan")
         self.last_feasible = True
+        self.last_mpcc_active = False
+        self.last_switch_count = 0
         self.last_boundary: list[tuple[float, float]] | None = None
+        # True simulator velocity states from /car_state/odom (twist).
+        # GP-residual experiment: prefer these over finite-diff estimates.
+        self.last_vx_odom = float("nan")
+        self.last_vy_odom = float("nan")
+        self.last_r_odom = float("nan")
         self.driven_paths: dict[int, list[tuple[float, float]]] = {0: []}
         self.start_time = time.time()
         self.row_count = 0
@@ -85,6 +97,8 @@ class MPCDebugLogger(Node):
             "feasible", "min_lateral_margin",
             "pred_dx_n0", "pred_dy_n0",
             "pred_x_end", "pred_y_end",
+            "mpcc_active", "switch_count",
+            "vx_odom", "vy_odom", "r_odom",
         ]
         self.csv.writerow(header)
         self.csv_file.flush()
@@ -107,6 +121,11 @@ class MPCDebugLogger(Node):
         self.create_subscription(Float64, "/mpc/cost", self.cb_cost, 1)
         self.create_subscription(Bool, "/mpc/is_feasible", self.cb_feasible, 1)
         self.create_subscription(MarkerArray, "/boundary_marker", self.cb_boundary, 1)
+        # True velocity states (sim ground truth) for GP-residual clean targets.
+        self.create_subscription(Odometry, "/car_state/odom", self.cb_odom, 1)
+        # mux 가 매 cycle publish — last 값만 잡아두고 CSV 매 row 에 같이 기록.
+        self.create_subscription(Bool,  "/mux/mpcc_active",  self.cb_mpcc_active,  10)
+        self.create_subscription(Int32, "/mux/switch_count", self.cb_switch_count, 10)
 
         # 1Hz status tick
         self.create_timer(1.0, self._tick)
@@ -121,12 +140,21 @@ class MPCDebugLogger(Node):
 
         s = float(d.get("current_s", 0.0))
         if self.last_s is not None and (self.last_s - s) > LAP_JUMP_THRESHOLD:
+            now_t = time.time()
+            prev_lap_t = getattr(self, '_lap_start_t', self.start_time)
+            lap_time_sec = now_t - prev_lap_t
             self.lap += 1
+            self._lap_start_t = now_t
             self.driven_paths[self.lap] = []
             self.get_logger().info(
-                f"[mpc_debug_logger] >>> LAP {self.lap} started "
+                f"[mpc_debug_logger] >>> LAP {self.lap} started — "
+                f"이전 lap 시간: {lap_time_sec:.2f}s "
                 f"(s rollover {self.last_s:.1f} -> {s:.1f})")
             self.lap_count_pub.publish(Int32(data=self.lap))
+            # /mpc/lap_time 발행 (Float64)
+            if not hasattr(self, 'lap_time_pub'):
+                self.lap_time_pub = self.create_publisher(Float64, '/mpc/lap_time', 10)
+            self.lap_time_pub.publish(Float64(data=lap_time_sec))
         self.last_s = s
 
         x, y = float(d.get("car_x", 0.0)), float(d.get("car_y", 0.0))
@@ -147,7 +175,9 @@ class MPCDebugLogger(Node):
               [d.get(k, 0.0) for k in DBG_FIELDS] + \
               [int(self.last_feasible),
                margin if margin is not None else float("nan"),
-               pred_dx0, pred_dy0, pred_xe, pred_ye]
+               pred_dx0, pred_dy0, pred_xe, pred_ye,
+               int(self.last_mpcc_active), int(self.last_switch_count),
+               self.last_vx_odom, self.last_vy_odom, self.last_r_odom]
         self.csv.writerow(row)
         self.row_count += 1
         if self.row_count % 50 == 0:
@@ -176,6 +206,18 @@ class MPCDebugLogger(Node):
 
     def cb_feasible(self, msg: Bool):
         self.last_feasible = bool(msg.data)
+
+    def cb_mpcc_active(self, msg: Bool):
+        self.last_mpcc_active = bool(msg.data)
+
+    def cb_switch_count(self, msg: Int32):
+        self.last_switch_count = int(msg.data)
+
+    def cb_odom(self, msg: Odometry):
+        # Ground-truth velocity states from the simulator (body frame twist).
+        self.last_vx_odom = float(msg.twist.twist.linear.x)
+        self.last_vy_odom = float(msg.twist.twist.linear.y)
+        self.last_r_odom = float(msg.twist.twist.angular.z)
 
     def cb_boundary(self, msg: MarkerArray):
         pts = []
