@@ -12,27 +12,46 @@ mpc_node:
     odom_topic_name: /car_state/odom
     localized_pose_topic_name: /car_state/pose
     goal_topic_name: /move_base_simple/goal
-    cmd_vel_topic_name: /vesc/high_level/ackermann_cmd_mux/input/nav_1
+    cmd_vel_topic_name: /vesc/high_level/ackermann_cmd   # car stack simple_mux input (matches PP controller)
 
     # Track loader
     track_name: f                  # → share/tracks/trackf/track f_*.csv
     track_dir: ""                  # empty = use installed share/tracks/
-    vel_scale: 0.95                # multiply ref_v from CSV col ß3
-    inflation_factor: 1.2
+    vel_scale: 1.0                  # multiply ref_v from CSV col 3
+    inflation_factor: 0.0          # 1.2→0.0 (2026-05-26): random track width 2m 에서 1.2 가 boundary 0.96m 안으로 줄여서 effective half = 0.04m → RViz 상 boundary 거의 centerline. 0.0 = raw boundary.
     extend_part: 2                 # loop overlap (extend_part=2 → +50%)
 
     # MPC sizing / vehicle limits
     vehicle_L: 0.307               # F1TENTH (unicorn FIESTA1) wheelbase
     # Conservative IFAC-demo baseline. event_stuck CSV 에서 차가 outside
     # over-shoot 후 reverse stuck → 박히기 전에 막아야. 6 → 4 (코너 과속 ↓).
-    max_speed: 4.0
-    max_speed_p: 4.0
-    # 풀-스티어 (±0.4) 가 over-shoot 의 직접 원인. 0.4 → 0.3 으로 cap.
-    # 헤어핀 통과 가능한 최소값: arctan(L / R_min) 기준 L=0.307, R_min≈0.7
-    # → 0.4 rad. 그러나 mpc 가 미리 조향하므로 0.3 으로도 충분.
-    mpc_max_steering: 0.3
-    dT: 0.025                      # 40 Hz control rate
-    N_horizon: 18
+    max_speed: 10.0
+    max_speed_p: 6.0
+    # R3 decouple test: hard cap=8 (above) but progress target + κ-window stay at
+    # the proven 6-regime → cap↑ should be harmless (unlike old coupled max=8).
+    speed_target: 4.0
+    lookahead_m: 2.0
+    brake_anticip_a: 3.0   # 2026-06-16 de-stack: 솔버 A_MIN_DYN(=3.0)과 일치시켜 명령단 제동거리캡이 솔버 plan을 이중으로 깎던 문제 제거(명령캡은 안전플로어로만). 낮출수록 코너 더 일찍/느리게 진입. 차엔 VESC 능동제동(#2) 살린 뒤 적용.
+    # 2026-06-11 조향 정직화: sim plant s_max=0.4189 (sim_params.yaml) 인데 0.45
+    # 로 계획 → 풀락 헤어핀에서 유령 조향 8% (계획 R 0.68m vs 실제 0.74m) = wide.
+    # plant 한계와 일치시킴. 실차는 VESC servo 매핑상 ±한계가 [-0.396, +0.428]
+    # (gain -1.2135, offset 0.52, servo 0..1) → 실차 배포 시 0.39 권장.
+    mpc_max_steering: 0.4189
+    # Cold-start / low-speed conditioning (2026-05-29, MPPI init_vel 기법).
+    # cold_start_vx_floor: solver 에 넘기는 x0 의 vx 하한 (dynamic 저속 ill-cond
+    #   회피 → 저속 steer chatter 제거 + 정지 출발). 0 = 비활성 (기존 PP-start 동작).
+    # startup_speed: 실측 vx 가 floor 미만일 때 출력 speed 하한 (forward push).
+    # 이 둘로 기존 3초 PP warmup ramp 대체 → t=0 부터 MPCC 조향.
+    cold_start_vx_floor: 2.0
+    startup_speed: 3.0
+    dT: 0.04                       # 0.025→0.04 (25Hz control rate). multi-dt 와 결합 — 첫 step.
+    N_horizon: 40                         # N20=18.4s best. N25/N50 시도(2026-06-08)는 N20-weight라 더 느림(22~25s)·stuck 이동 → 원복. horizon 늘리려면 N에 맞춰 재튜닝(BO) 필요.
+    # time_steps_mode: 'uniform' (모든 step dt=dT) 또는 'pyramidal' (multi-dt: 가까이 sharp + 멀리 long planning).
+    # pyramidal: dt = [dT]*20 + [dT*1.5]*30 + [dT*2.5]*30
+    #   = [0.04]*20 + [0.06]*30 + [0.10]*30 → 0.8 + 1.8 + 3.0 = 5.6s horizon
+    #   v=4: 22m, v=7: 39m — 다음 코너 + α 보임 → outside-inside-outside racing line 학습.
+    # solve_ms 영향 거의 없음 (N=80 그대로). codegen 처음 한 번 ~30s.
+    time_steps_mode: 'uniform'   # pyramidal 시도했지만 multi-dt 가 ODE/cost stage-dt aware 안 되어 cost spike (3306>200) 매 cycle → safe fallback. uniform 으로 후퇴.
     integration_mode: Euler
 
     # MPC weights file (BO_params_LTM.json bundled in share/config/mpc/)
@@ -44,14 +63,93 @@ mpc_node:
     #   raceline   → /global_waypoints (IQP 사전 최적화된 racing line.
     #                코너에서 자연스럽게 apex 통과, vx_mps 점별 가속/감속.
     #                D_apex 는 0 권장 — raceline 자체가 이미 apex 통과)
-    track_source: raceline
+    track_source: raceline   # MPCC corridor reference (B-mode가 corridor 내 racing line 자유결정). raceline 모드는 구조적 wedge(미해결).
+
+    # auto_tune=true 이면 max_speed 한 변수만 사용자가 설정하고, 나머지
+    # q_lag / q_cte / max_speed_p / alpha_steer / corridor / D_apex /
+    # cost_spike_thr 는 _auto_tune_from_max_speed() 의 heuristic 매핑으로
+    # 자동 결정. 매핑 공식은 mpc_node.py 의 docstring 참고.
+    # 빠르게 튜닝하려면 true, 수동 정밀 튜닝 원하면 false.
+
+    # C: MLP weight scaler. use_ml_scale=true 면 _adaptive_weight_update()
+    # 가 B heuristic 대신 NN 추론 사용. 학습된 .pt 없으면 자동 B 폴백.
+    # 학습: python3 -m nonlinear_mpc_acados.ml.train --epochs 200
+    # ml_model_path "" → 기본 위치 (ml/saved/weight_scaler.pt) 사용.
+
+    # ── Dynamic Pacejka 모드 ──
+    # dynamic=True: 8-state, tire slip 모델링 (정확, 느림)
+    # dyn_tire_model: 'linear' / 'tanh' / 'pacejka'
+    #   linear: F_y = C_α · α (slip 작을 때만 정확)
+    #   tanh  : 2026-05-27 review #9. lat_g=24 m/s² 영역에서 linear 한계 → tanh 권장.
+    #           코너 진입 시 tire saturation 모델링.
+    use_dynamic: true
+    # nlp_solver_iters: 1 → SQP_RTI (실시간 안정, 기본). >1 → SQP(max_iter cap)+
+    # MERIT_BACKTRACKING globalization. 1-iter RTI 가 저속 dual-active-set 함정에서
+    # 못 빠져나오는 문제 탈출용. A/B: 1 vs 2 (sim 에서만 검증 후 차 적용).
+    nlp_solver_iters: 1
+    dyn_tire_model: tanh
+    # 모델 타이어 μ — sim_params.yaml mu(또는 실차 노면)와 일치시킬 것 (2026-06-10 그립 정직화)
+    dyn_mu: 1.0489    # 이 노트북 sim_params.yaml mu=0.6 일치 (실차 배포 시 차 노면값으로 재결정 — 06-09 재측정 1.0489, 이전 차값 0.65)
+    # friction ellipse headroom η (a_lim = μ·g·η). 1.0=물리한계 꽉 채움.
+    ellipse_frac: 0.95
+    # acados LM regularization for dynamic model (QP conditioning / prediction
+    # consistency). 1.0 = previous default. Higher → fewer QP_Failure/MINSTEP.
+    lm_dynamic: 3.0
+
+    # Phase D — GP residual learning (offline-trained sparse GP).
+    # use_gp_residual=true → setup_MPC 후 ResidualLearningMPC 로 wrap.
+    # gp_ckpt_path 비우면 ~/bo_results/gp_residual.pt 자동.
+    # 첫 launch 추가 codegen ~30s. import error / 파일 없으면 plain acados fallback.
+
+    # Phase D (closed-form CasADi GP) — INDEPENDENT of use_gp_residual.
+    # use_gp_casadi=true → bakes the trained GP posterior mean as a pure
+    use_gp_casadi: true   # GP 잔차보정 ON (gp_residual_realvy.pt)
+    # CasADi expression into the DYNAMICS only (cost/p_sym untouched), no
+    # torch/gpytorch/l4acados at runtime. Default OFF.
+
+    # B (VPMPCC simplify): override_mode 는 'off' 고정. BO 는 q_*_scale_live 만
+    # 직접 갱신. legacy modes (fixed / bucketed / polynomial) 는 mpc_node.py
+    # 에 코드 경로만 남고 yaml 키는 default 로 fallback.
+
+    # 자동 max_speed stepper — 같은 launch 안에서 lap 카운트 기반으로
+    # effective v_max 자동 증가. codegen ubu cap (yaml max_speed) 가 절대
+    # 상한 — auto_step_end 와 같게 두기. mpc.v_max (cost target) 만 변경.
+    #   start → end, +size 마다 laps 바퀴.
+    # 2026-05-28 사용자 idea: v 점진 ramp (model mismatch 적응 시간 줌)
+    # start=5 (검증 안정) → 0.5씩 step → end=6 (target). 매 2 lap 마다 step.
+    # = lap 1-2: v=5, lap 3-4: v=5.5, lap 5-6: v=6 (목표 도달).
+    # K1 (2026-05-29): autoreg_speed_bo.sh 가 stage 별로 max_speed 직접 set →
+    # 한 launch 안의 auto_step ramp 와 모순 (v=7 stage 에 end=6 이면 cap 충돌).
+    # autoreg sweep 중에는 disable. 단일 launch v ramp 필요 시 다시 true.
+
+    # ── LMPC (Learning MPC, Rosolia 2018) ──
+    # 2026-05-28 #18: terminal cost = softmin over Sampled Safe Set (K nearest
+    # historical states) + regularization. lap-by-lap value function 학습으로
+    # tire-model mismatch (gym ST vs MPCC Pacejka) 를 자동 보상.
+    # use_lmpc=false (default) — LMPC term cost weight = 0, 기존 동작 동일.
+    lmpc_K_points: 10          # SS kNN K (acados p_sym 에 hardcoded 10)
+    lmpc_K_laps: 4             # most-recent/best K laps (LMPC SS)
+    # Failed lap filter (reviewer #4-A — bad lap 이 SS 오염 막음)
+    # 2026-06-12 LMPC accept ec-cap: 100.0(사실상 off) → 0.25. 관측된 양성
+    # 피드백 루프 차단 — accept가 n_resets만 보던 동안 고-ec 랩(0.31m+)이
+    # safe set에 들어가 terminal set을 라인 밖으로 끌어냄 (ec 0.16→0.42m
+    # 단조 드리프트, lap 22.16→23.6s, lap29부터 s=62.44 stuck 4회;
+    # LMPC-off 40랩은 flat 22.5-22.8s/0 stuck — 2026-06-11 A/B 확정).
 
     # Fixed-width MPC corridor (centerline/raceline ± half-width, 좌우 대칭).
     # raceline 모드에서 장애물 회피 위해선 corridor 폭이 차폭(0.32) + 안전
     # 마진(0.15) + lateral detour offset(0.3) 합보다 커야. 0.4 → 0.7m.
     # raceline 자체가 안정 reference 이므로 corridor 넓혀도 oscillation 적음.
     # 너무 키우면(>0.9) 코너에서 corridor 가 트랙 벽 밖으로 빠질 수도.
-    mpc_corridor_half_width: 0.7
+    mpc_corridor_half_width: 0.0  # MPCC corridor half-width (centerline±, racing line 여지)
+    # 2026-06-08: 코리도어 폭-기반 속도캡 인프라 (track_loader.corridor_speed_cap).
+    # ★현재 OFF (floor=0): final 맵이 uniformly tight(post-margin 폭 mean 1.14)라
+    # 폭으로 crash지점(~0.7-1.0)을 typical(1.14)과 구분 못함 → 켜면 트랙 98% 감속
+    # → 랩타임↑·완만커브 가속 사라짐(사용자 지적). 폭 단일캡은 이 트랙엔 부적합.
+    # crash(s≈60 좁고직선) 진짜 해법 = racing-line(코너컷) / steer-hunting 잡기.
+    corridor_v_floor: 0.0          # 2026-06-08 crash-fix: 제일 좁은 곳만 감속 (surgical)
+    corridor_v_tight_width: 0.6    # 2026-06-15 BO surgical corridor (0.75→0.6): 20.2→19.4s
+    corridor_v_wide_width: 0.8     # 2026-06-15 BO surgical corridor (1.0→0.8)
 
     # Vehicle dynamics — only `l_wb` consumed in kinematic mode (current default)
     vehicle.l_wb: 0.307
@@ -62,37 +160,49 @@ mpc_node:
     # Live-tunable weights (rqt_reconfigure 대체). Defaults mirror mpc_core.
     # ROS1 unicorn 검증값으로 환원 (cycle-flat cost surface 의 oscillation 은
     # corridor / D_apex 로 잡고, cost weights 는 검증된 값 유지).
-    q_cte_live: 4.0
-    q_lag_live: 200.0
-    q_d_delta_live: 25.0
+    q_cte_live: 1.0        # B 0.3 → Hybrid 1.0 (2026-05-26). 느슨한 centerline 추종 + corridor 자유 동시.
+    q_lag_live: 8.0        # B 2.0 → Hybrid 8.0. progress 어느 정도 강제 — 안정 baseline.
+    q_d_delta_live: 25.0   # base 값. 동적 조정은 MLP q_drate_scale_live (1~3×) 가 담당.
     # 회피 거리 공식: projection ≥ R_safe + R_car. R_car 는 차 반지름,
     # R_safe 는 장애물 자체 반지름 + 안전 margin. 둘 분리해서 튜닝.
     # 회피 범위 좁힘: 0.35 → 0.25 (장애물 반지름 0.15 + 차 외곽 margin 0.10).
     # 차 외곽 ↔ 장애물 외곽 빈 공간 ≈ 0.10m. 더 가까이 통과 가능.
-    R_safe_live: 0.25
+    R_safe_live: 0.55
     M_slack_live: 20000.0
-    a_lat_safe_live: 6.0
+    # a_lat_safe_live: 코너 측방 가속도 한계. 크면 코너에서 더 공격적 (ref_v cap = √(a_lat/κ) 증가).
+    # rand_a 의 κ_max=0.4417 (R_min=2.26m) → v_cap @ a_lat=30 = √(30/0.4417) = 8.24 m/s.
+    # 6→10→15→30 history. v=6 sweep 위해 30 까지 올림 — 그러나 30(=3g)은 그립 한계
+    # (~0.9g) 초과라 곡률 speed-cap 무력화 → 타이트 코너 과속 진입 → 박힘 (2026-05-29
+    # 진단: 남은 stall 13/13 over-speed entry). 물리적 그립으로 복원: 8 > 6 (코드 주석의
+    # 의도값, a_lat_max=8 hard 아래 headroom). ref_v cap = √(a_lat/κ) 가 코너서 실제 작동.
+    a_lat_safe_live: 15.8897
     # D_detour_live: 회피 시 lateral offset [m]. 0.3 → 0.2 → 0.1.
     # R_safe (hard constraint, 0.25m) 가 충돌 회피 보장하므로 D_detour 는
     # soft target 만이라 작아도 안전. 회피 후 raceline 복귀 시 over-shoot ↓.
-    D_detour_live: 0.1
-    # D_apex_live: raceline 모드에선 raceline 자체가 apex 통과 → 0 권장.
-    # centerline 모드 사용 시 0.35 로 키워 코너 컷팅 강제.
-    D_apex_live: 0.0
+    D_detour_live: 0.30
+    # D_apex_live: ACTIVE (2026-06-01 복원). e_c_ref = -D_apex·tanh(signed_κ/0.20)
+    # 로 contour reference 를 코너 안쪽(apex)으로 bias (acados_kinematic.py ~L888).
+    # 0 = off (pure centerline). ★주의: ref_v κ-cap 은 centerline-κ 기반이라 apex 가
+    # 더 빠른 ref_v 를 못 받음 → 라인만 바뀌고 속도이득 無 (구조적 한계, PIPELINE §8).
+    D_apex_live: 0.0901
     # R_car_live: 차 반지름 (m). F1TENTH width 0.30 ÷ 2 = 0.15.
-    R_car_live: 0.15
+    R_car_live: 0.30               # 원래값 복원
     # commit_dist_live: 회피 시작 거리. 클수록 일찍 commit. 10 → 15 (일찍).
     commit_dist_live: 15.0
     # cost_spike_thr_live: ringing 잡기 위해 500 → 200 으로 낮춤. fallback
     # (ref_v·0.3 + heading hold + warm-start rebuild) 가 oscillation 초기에
     # 트리거됨.
-    cost_spike_thr_live: 200.0
-    alpha_steer_live: 0.6
-    # acados scale slots
-    q_cte_scale_live: 1.0
-    q_lag_scale_live: 1.0
-    q_psi_scale_live: 1.0
-    q_v_scale_live: 1.0
-    q_dd_scale_live: 1.0
-    q_p_scale_live: 1.0
-    q_drate_scale_live: 1.0
+    cost_spike_thr_live: 8000.0  # 1500→8000 (2026-05-28 fix). v=6/7/8 시 실측 정상 cost 500-2000. 1500 너무 빡빡해서 정상 운전도 fallback 무한 cycle → BO plateau. 8000 = 진짜 instability (10K+) 만 트리거.
+    alpha_steer_live: 0.85   # base. auto_tune 매핑이 max_speed 따라 갱신.
+    # 2026-05-28 BO v=6 retry best — 30 iter post-#13, Q=-47.57, lap=14.32s
+    # (PP 15.66, -8.6%; ideal 13.73, +4.3%; n_resets=2 안정; v_avg=4.99)
+    # v=4 Phase A best (q_p=4.28 dominant) 과 정반대: v=6 에서는 q_cte=4.96 strong + q_p=0.42 약.
+    # 빠른 차일수록 "centerline 단단히 추종 + anti-osc 강하게" 가 안전.
+    q_cte_scale_live: 4.9469
+    q_lag_scale_live: 0.6392
+    q_psi_scale_live: 1.7526
+    q_v_scale_live: 1.4792
+    q_dd_scale_live: 1.0       # not in BO
+    q_p_scale_live: 4.9647
+    q_drate_scale_live: 27.8138
+    q_dv_scale_live: 0.3001

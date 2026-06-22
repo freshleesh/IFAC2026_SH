@@ -40,6 +40,7 @@ class TrackData:
     left_lut_x: Any
     left_lut_y: Any
     lut_ref_v: Any
+    ref_v: np.ndarray = field(default=None)  # raw speed profile (only from build_track_from_wpnts)
     center_point_angles: np.ndarray = field(default=None)
     # Raw (un-inflated, un-extended) boundary lanes for RViz viz publishers
     # /center_path /right_path /left_path. center_lane (above) is extended
@@ -156,11 +157,36 @@ def load_track(track_dir: str, track_name: str,
                         inflation_factor=inflation_factor, extend_part=extend_part)
 
 
+def corridor_speed_cap(width: float, v_full: float, v_floor: float = 0.0,
+                       w_tight: float = 1.0, w_wide: float = 1.6) -> float:
+    """Speed cap from corridor width (complements the curvature cap).
+
+    A narrow-but-gently-curving section has low |κ|, so √(a_lat/|κ|) lets the
+    car run ~v_max and clip the wall. This caps speed by available width:
+    wide corridor → `v_full`; narrow → ramped linearly down to `v_floor`
+    between `w_wide` and `w_tight`. `v_floor<=0` (or w_wide<=w_tight) disables
+    it (returns `v_full`), so it is opt-in and a no-op by default.
+    """
+    if v_floor <= 0.0 or w_wide <= w_tight:
+        return v_full
+    if width >= w_wide:
+        return v_full
+    if width <= w_tight:
+        return v_floor
+    frac = (width - w_tight) / (w_wide - w_tight)
+    return v_floor + (v_full - v_floor) * frac
+
+
 def build_track_from_wpnts(wpnts, vel_scale: float = 1.0,
                            inflation_factor: float = 1.2,
                            extend_part: int = 2,
                            default_v: float = 5.0,
-                           corridor_half_width: float = 0.0) -> TrackData:
+                           corridor_half_width: float = 0.0,
+                           a_lat_max: float = 6.0,
+                           a_long_max: float = 3.0,
+                           corridor_v_floor: float = 0.0,
+                           corridor_v_tight: float = 1.0,
+                           corridor_v_wide: float = 1.6) -> TrackData:
     """Same TrackData as `load_track`, but built from a list of `f110_msgs/Wpnt`.
 
     Designed for race-stack `/centerline_waypoints` ingestion: wpnt fields
@@ -190,34 +216,102 @@ def build_track_from_wpnts(wpnts, vel_scale: float = 1.0,
     # corridor_half_width > 0: fixed-width MPC corridor (centerline ± half).
     #   mpc lateral search space cap, 좌우 대칭. 코너에서 raw d_left/d_right
     #   가 망가지지 않게 함. inflation 은 우회됨 (사용자 설정값이 곧 cap).
-    a_lat_max = 6.0
     use_fixed_corridor = corridor_half_width > 1e-3
     for i, w in enumerate(wpnts):
         x, y = w.x_m, w.y_m
-        psi = w.psi_centerline_rad if abs(w.psi_centerline_rad) > 1e-9 else w.psi_rad
+        psi_c = getattr(w, 'psi_centerline_rad', 0.0)  # optional field; absent on car's Wpnt
+        psi = psi_c if abs(psi_c) > 1e-9 else w.psi_rad
         c, s = np.cos(psi), np.sin(psi)
         center_lane[i] = (x, y)
         center_deriv[i] = (c, s)
         if use_fixed_corridor:
             d_r = d_l = corridor_half_width
         else:
-            d_r, d_l = float(w.d_right), float(w.d_left)
+            # Corridor bounds the car CENTER, but d_left/d_right are distances
+            # to the track walls. Subtract a safety margin (car half-width
+            # ~0.16 + buffer) on each side so the car body doesn't clip the
+            # wall — without it the raceline (which hugs the inside edge at
+            # apexes) leaves zero room and the car wedges (STUCK storm).
+            _WALL_MARGIN = 0.18   # 2026-06-02: 0.25→0.18 (final 좁은 트랙: d=0.36m서 0.25면 corridor 0.11m→QP infeasible→fails폭증. car 반폭~0.15 기준 0.18이 최소안전)
+            d_r = max(0.05, float(w.d_right) - _WALL_MARGIN)
+            d_l = max(0.05, float(w.d_left) - _WALL_MARGIN)
         # right normal = (+sin(psi), -cos(psi)); left normal = (-sin(psi), +cos(psi))
+        # NOTE: d_left/d_right are measured along the CENTERLINE normal, so this
+        # projection is exact ONLY when psi == centerline tangent. Line 220
+        # prefers psi_centerline_rad (the centerline tangent) for exactly this
+        # reason. The psi_rad fallback (wpnts lacking centerline psi, e.g. a raw
+        # raceline) would place the boundary off by 1/cos(Δψ) at points where the
+        # wpnt heading differs from the centerline — feed centerline psi to avoid.
         right_lane[i] = (x + d_r * s,  y - d_r * c)
         left_lane[i]  = (x - d_l * s,  y + d_l * c)
+        # Speed reference: cap to BOTH our top speed (default_v = v_max) AND the
+        # κ-aware lateral-grip limit √(a_lat_max/|κ|). The IQP raceline ships
+        # vx_mps optimized for a higher-grip/faster car (7-13 m/s here); used
+        # raw (previous behaviour) it never slowed for apexes at our v=5 → the
+        # car entered geometric apexes too hot → wedge (STUCK storm in raceline
+        # mode). Taking the min slows it at high-curvature points per OUR limits
+        # while still following the raceline GEOMETRY. Because the raceline is
+        # min-curvature, its |κ| at corners is lower than the centerline's, so
+        # the κ-cap permits MORE corner speed than centerline → faster lap.
+        kappa = abs(float(w.kappa_radpm))
+        v_kappa = np.sqrt(a_lat_max / kappa) if kappa > 1e-3 else default_v
         v_msg = float(w.vx_mps) * vel_scale
-        if v_msg > 1e-3:
-            ref_v[i] = v_msg
-        else:
-            kappa = abs(float(w.kappa_radpm))
-            v_kappa = np.sqrt(a_lat_max / kappa) if kappa > 1e-3 else default_v
-            ref_v[i] = float(np.clip(v_kappa, 1.0, default_v))
+        v_src = v_msg if v_msg > 1e-3 else default_v
+        # Corridor-width cap: the κ-cap is blind to width, so a narrow-but-
+        # straight section (low |κ|) otherwise runs at v_max and clips the wall
+        # (final-map s≈60 crash). d_r/d_l here are already wall-margin-subtracted,
+        # so (d_r+d_l) is the usable corridor the car center must stay within.
+        v_corr = corridor_speed_cap(d_r + d_l, default_v, corridor_v_floor,
+                                    corridor_v_tight, corridor_v_wide)
+        ref_v[i] = float(np.clip(min(v_src, v_kappa, default_v, v_corr),
+                                 1.0, default_v))
+
+    # ── Forward-backward velocity profile (TUM calc_vel_profile style) ──
+    # The pointwise κ-cap above sets the APEX speed but does NOT tell the car to
+    # brake BEFORE the apex. At v=5 with a real braking limit the car then
+    # entered apexes too hot (late braking) → wedge in raceline mode. Propagate
+    # the speed limits along the loop: a backward pass enforces "slow enough to
+    # brake into the next point", a forward pass enforces "don't exceed what
+    # acceleration out of the previous point allows". Result: a feasible profile
+    # that decelerates AHEAD of corners. Loop-closed (the track is a circuit).
+    # Applied only in the raceline/raw-corridor path (use_fixed_corridor=False);
+    # C1 (2026-06-17): the BACKWARD (braking) pass now runs in fixed-corridor
+    # mode too. Horizon is short (N=20·dT=0.04 = 0.8s ≈ 3m); without pre-corner
+    # deceleration baked into ref_v the solver can't brake in time at high speed
+    # (6→2.5 needs ~5m > horizon), which forced the external brake_anticip hack.
+    # The pass only ever LOWERS ref_v (min), uses a_long = |A_MIN_DYN| (solver-
+    # matched), so it can never make corner entry hotter — strictly safer.
+    # The FORWARD (accel) pass stays raceline-only: the car accelerates far
+    # faster than a_long(=3.0) (dyn_a_max=7.5), so capping exit ramp at 3.0
+    # would needlessly throttle corner exits.
+    if n >= 4:
+        a_long = float(a_long_max)
+        ds = np.empty(n, dtype=float)
+        for i in range(n):
+            j = (i + 1) % n
+            ds[i] = float(np.hypot(center_lane[j, 0] - center_lane[i, 0],
+                                   center_lane[j, 1] - center_lane[i, 1]))
+        for _ in range(2):   # 2 wrap sweeps to converge across the start seam
+            for i in range(n - 1, -1, -1):          # backward: braking (always)
+                j = (i + 1) % n
+                v_brake = float(np.sqrt(ref_v[j] ** 2 + 2.0 * a_long * ds[i]))
+                if v_brake < ref_v[i]:
+                    ref_v[i] = v_brake
+            if not use_fixed_corridor:               # forward: accel (raceline only)
+                for i in range(n):
+                    k = (i - 1) % n
+                    v_acc = float(np.sqrt(ref_v[k] ** 2 + 2.0 * a_long * ds[k]))
+                    if v_acc < ref_v[i]:
+                        ref_v[i] = v_acc
+        ref_v = np.clip(ref_v, 1.0, default_v)
 
     # Fixed-width corridor already represents the mpc cap → skip inflation
     # (otherwise the boundary would be pulled inside the user-set width).
     eff_inflation = 0.0 if use_fixed_corridor else inflation_factor
-    return _build_track(center_lane, center_deriv, right_lane, left_lane, ref_v,
-                        inflation_factor=eff_inflation, extend_part=extend_part)
+    td = _build_track(center_lane, center_deriv, right_lane, left_lane, ref_v,
+                      inflation_factor=eff_inflation, extend_part=extend_part)
+    td.ref_v = ref_v.copy()  # stash raw (post-brake-profile) array for tests & diagnostics
+    return td
 
 
 def find_current_arc_length(track: TrackData, car_pos: np.ndarray,
@@ -259,8 +353,11 @@ def find_current_arc_length(track: TrackData, car_pos: np.ndarray,
     else:
         current_s = float(s_arr[nearest])
 
-    if nearest == 0:
-        current_s = 0.0
+    # NOTE: do NOT force current_s=0 when nearest==0. When the car is just
+    # BEHIND the start/finish seam the projection legitimately yields s≈L
+    # (actual=last waypoint); clobbering it to 0 injected a full-lap
+    # discontinuity at the line every lap. The wrap below handles s≥L_orig,
+    # and the exactly-at-start case already reads s_arr[0]=0 via the else branch.
     if current_s >= L_orig:
         current_s = current_s % L_orig
     return current_s, nearest

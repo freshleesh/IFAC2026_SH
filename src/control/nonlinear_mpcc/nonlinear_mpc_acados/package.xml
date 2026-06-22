@@ -3,27 +3,23 @@
 <package format="3">
   <name>nonlinear_mpc_acados</name>
   <version>0.1.0</version>
-  <description>ROS2 (rclpy) wrapper for the EVO-MPCC acados / IPOPT MPC core. The numerical MPC lives in the standalone Python package `mpc_core` (pip install -e ../../mpc_core); this package only handles ROS2 interfacing.</description>
+  <description>VPMPCC + EVO-MPCC LTM acados controller (ported from IFAC2026_SH)</description>
   <maintainer email="dnrwls04@naver.com">hmcl</maintainer>
   <license>BSD-3-Clause</license>
 
-  <buildtool_depend>ament_python</buildtool_depend>
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>ackermann_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>f110_msgs</depend>
 
-  <exec_depend>rclpy</exec_depend>
-  <exec_depend>std_msgs</exec_depend>
-  <exec_depend>geometry_msgs</exec_depend>
-  <exec_depend>nav_msgs</exec_depend>
-  <exec_depend>sensor_msgs</exec_depend>
-  <exec_depend>visualization_msgs</exec_depend>
-  <exec_depend>ackermann_msgs</exec_depend>
-  <exec_depend>tf_transformations</exec_depend>
   <exec_depend>osuf1_common</exec_depend>
-  <exec_depend>f110_msgs</exec_depend>
-
-  <test_depend>ament_copyright</test_depend>
-  <test_depend>ament_flake8</test_depend>
-  <test_depend>ament_pep257</test_depend>
-  <test_depend>python3-pytest</test_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>tf_transformations</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

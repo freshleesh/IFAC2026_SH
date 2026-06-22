@@ -1,0 +1,26 @@
+{
+  "_comment": "BO 매트릭스 (2026-06-10, final2, 30call/스윕, raw_best 기준). 적용 시 q_*→q_*_scale_live, a_lat_safe/D_apex→*_live + max_speed 동반 설정. 검증=각 3런(10분) final2.",
+  "sweeps": {
+    "A_dyn_mu06_ms8": {
+      "model": "dynamic", "sim_mu": 0.6, "dyn_mu": 0.6, "max_speed": 8.0,
+      "bo_lap_mean": 23.88, "validated": "skip (B가 상위호환 후보였음)",
+      "params": {"q_cte": 0.1021, "q_lag": 0.3232, "q_psi": 4.3581, "q_v": 0.8241, "q_p": 0.3431, "q_drate": 4.3275, "q_dv": 0.3724, "a_lat_safe": 13.2046, "D_apex": 0.853}
+    },
+    "B_dyn_mu06_ms10": {
+      "model": "dynamic", "sim_mu": 0.6, "dyn_mu": 0.6, "max_speed": 10.0,
+      "bo_lap_mean": 23.04, "validated": "FAIL — 3런 중 2런 즉시 STUCK(s≈25, v_est=0). 저그립 차 기본 파라미터 유지 권장.",
+      "params": {"q_cte": 0.146, "q_lag": 1.581, "q_psi": 0.875, "q_v": 4.231, "q_p": 0.778, "q_drate": 10.788, "q_dv": 0.659, "a_lat_safe": 7.084, "D_apex": 0.157}
+    },
+    "C_dyn_mu1049_ms10": {
+      "model": "dynamic", "sim_mu": 1.0489, "dyn_mu": 1.0489, "max_speed": 10.0,
+      "bo_lap_mean": 18.84, "validated": "PASS 3/3 — 620s/32랩 ≈19.4s/lap(웜업 포함), STUCK 0, teleport 0. 고그립차 권장 파라미터.",
+      "params": {"q_cte": 0.8758, "q_lag": 4.7995, "q_psi": 0.5515, "q_v": 0.7673, "q_p": 4.9314, "q_drate": 29.748, "q_dv": 0.3872, "a_lat_safe": 12.9098, "D_apex": 0.0586}
+    },
+    "D_kin_mu1049_ms8": {
+      "model": "kinematic", "sim_mu": 1.0489, "max_speed": 8.0,
+      "bo_lap_mean": 24.88, "validated": "skip — 같은 고그립에서 dynamic(C) 대비 6s 열세. kinematic 비경쟁 재확인.",
+      "params": {"q_cte": 0.2, "q_lag": 1.592, "q_psi": 1.127, "q_v": 0.39, "q_p": 1.13, "q_drate": 26.627, "q_dv": 0.379, "a_lat_safe": 3.748, "D_apex": 0.692}
+    }
+  },
+  "source_jsons": ["bo_turbo_20260610_200536.json", "bo_turbo_20260610_205330.json", "bo_turbo_20260610_213608.json", "bo_turbo_20260610_222425.json"]
+}
