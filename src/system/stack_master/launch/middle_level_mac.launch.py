@@ -61,6 +61,18 @@ def generate_launch_description() -> LaunchDescription:
     rviz_low_arg     = DeclareLaunchArgument("use_rviz_low_level", default_value="false")
     rviz_livo_arg    = DeclareLaunchArgument("use_rviz_livo", default_value="true")
     joy_arg          = DeclareLaunchArgument("use_joy", default_value="true")
+    use_cc_arg       = DeclareLaunchArgument("use_current_control", default_value="false",
+                                             description="low_level_mac 으로 forward: 전류 PID 제어")
+    cc_kp_arg        = DeclareLaunchArgument("cc_kp", default_value="3.0")
+    cc_ki_arg        = DeclareLaunchArgument("cc_ki", default_value="6.0")
+    cc_kd_arg        = DeclareLaunchArgument("cc_kd", default_value="0.0")
+    cc_imax_arg      = DeclareLaunchArgument("cc_current_max", default_value="30.0")
+    cc_imin_arg      = DeclareLaunchArgument("cc_current_min", default_value="-20.0")
+    cc_dimin_arg     = DeclareLaunchArgument("cc_driver_current_min", default_value="-55.0")
+    cc_dimax_arg     = DeclareLaunchArgument("cc_driver_current_max", default_value="90.0")
+    cc_ssign_arg     = DeclareLaunchArgument("cc_speed_sign", default_value="1.0")
+    cc_csign_arg     = DeclareLaunchArgument("cc_current_sign", default_value="1.0")
+    cc_mabs_arg      = DeclareLaunchArgument("cc_max_abs_speed", default_value="12.0")
     controller_arg   = DeclareLaunchArgument("controller", default_value="simple_pp",
                                              description="simple_pp | mppi — drop-in 교체")
     mppi_params_arg  = DeclareLaunchArgument("mppi_params_file", default_value="",
@@ -75,6 +87,7 @@ def generate_launch_description() -> LaunchDescription:
     use_rviz_low    = LaunchConfiguration("use_rviz_low_level")
     use_rviz_livo   = LaunchConfiguration("use_rviz_livo")
     use_joy         = LaunchConfiguration("use_joy")
+    use_cc          = LaunchConfiguration("use_current_control")
 
     # ── Resolved paths ─────────────────────────────────────────────────
     sm_share        = get_package_share_directory("stack_master")
@@ -99,6 +112,17 @@ def generate_launch_description() -> LaunchDescription:
         launch_arguments={
             "use_rviz": use_rviz_low,
             "joy": use_joy,
+            "use_current_control":   use_cc,
+            "cc_kp":                 LaunchConfiguration("cc_kp"),
+            "cc_ki":                 LaunchConfiguration("cc_ki"),
+            "cc_kd":                 LaunchConfiguration("cc_kd"),
+            "cc_current_max":        LaunchConfiguration("cc_current_max"),
+            "cc_current_min":        LaunchConfiguration("cc_current_min"),
+            "cc_driver_current_min": LaunchConfiguration("cc_driver_current_min"),
+            "cc_driver_current_max": LaunchConfiguration("cc_driver_current_max"),
+            "cc_speed_sign":         LaunchConfiguration("cc_speed_sign"),
+            "cc_current_sign":       LaunchConfiguration("cc_current_sign"),
+            "cc_max_abs_speed":      LaunchConfiguration("cc_max_abs_speed"),
         }.items(),
         condition=IfCondition(use_low_level),
     )
@@ -306,6 +330,8 @@ def generate_launch_description() -> LaunchDescription:
     return LaunchDescription([
         map_arg, low_level_arg, rviz_low_arg, rviz_livo_arg, joy_arg,
         controller_arg, mppi_params_arg, mppi_wpt_arg, mppi_wall_arg,
+        use_cc_arg, cc_kp_arg, cc_ki_arg, cc_kd_arg, cc_imax_arg, cc_imin_arg,
+        cc_dimin_arg, cc_dimax_arg, cc_ssign_arg, cc_csign_arg, cc_mabs_arg,
         low_level,
         livo_node, livo_rviz,
         global_init_node,

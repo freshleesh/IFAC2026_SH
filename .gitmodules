@@ -31,3 +31,6 @@
 	path = src/control/nonlinear_mpcc/mpcc
 	url = https://github.com/dnrwls04/mpcc.git
 	branch = main
+[submodule "src/control/vesc_current_control"]
+	path = src/control/vesc_current_control
+	url = https://github.com/heedo7425/vesc_current_control

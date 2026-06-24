@@ -29,12 +29,18 @@ import os
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 from ament_index_python.packages import get_package_share_directory
+
+
+def _farg(name):
+    """launch arg 를 float 파라미터로 강제 변환 (정수 입력도 DOUBLE 로)."""
+    return ParameterValue(LaunchConfiguration(name), value_type=float)
 
 
 def generate_launch_description():
@@ -47,6 +53,7 @@ def generate_launch_description():
     camera_fps = LaunchConfiguration('camera_fps')
     vesc_config = LaunchConfiguration('vesc_config')
     use_joy = LaunchConfiguration('joy')
+    use_cc = LaunchConfiguration('use_current_control')   # True=전류PID, False=기존 속도(eRPM)
 
     # ── Sensor bringup (camera + livox + optional rviz; DYLD_LIBRARY_PATH 포함) ──
     cam_lidar_share = get_package_share_directory('camera_lidar_calibration')
@@ -64,20 +71,50 @@ def generate_launch_description():
         }.items(),
     )
 
-    # ── VESC HW (시리얼 통신 + ackermann 변환 + odom) ──
-    vesc_driver_node = Node(
-        package='vesc_driver',
-        executable='vesc_driver_node',
-        name='vesc_driver_node',
-        output='screen',
-        parameters=[vesc_config],
+    # ── VESC HW (시리얼 통신 + 변환 + odom) ──
+    # 변환 단을 토글: use_current_control=false → ackermann_to_vesc(속도→eRPM, 기존),
+    #                 true → speed_pid_to_current(속도 PID→전류, vesc_current_control).
+    # 토픽이 루트(/ackermann_cmd /sensors/core /commands/motor/* /commands/servo/*)라 remap 불필요.
+
+    # vesc_driver — 속도모드 (vesc_config 그대로: current_min=0)
+    vesc_driver_speed = Node(
+        package='vesc_driver', executable='vesc_driver_node', name='vesc_driver_node',
+        output='screen', parameters=[vesc_config],
+        condition=UnlessCondition(use_cc),
     )
-    ackermann_to_vesc = Node(
-        package='vesc_ackermann',
-        executable='ackermann_to_vesc_node',
-        name='ackermann_to_vesc_node',
+    # vesc_driver — 전류모드 (회생 위해 current_min/max override)
+    vesc_driver_current = Node(
+        package='vesc_driver', executable='vesc_driver_node', name='vesc_driver_node',
         output='screen',
-        parameters=[vesc_config],
+        parameters=[vesc_config, {
+            'current_min': _farg('cc_driver_current_min'),
+            'current_max': _farg('cc_driver_current_max'),
+        }],
+        condition=IfCondition(use_cc),
+    )
+
+    # 변환단 A: ackermann_to_vesc (기존 속도/eRPM)
+    ackermann_to_vesc = Node(
+        package='vesc_ackermann', executable='ackermann_to_vesc_node',
+        name='ackermann_to_vesc_node', output='screen', parameters=[vesc_config],
+        condition=UnlessCondition(use_cc),
+    )
+    # 변환단 B: speed_pid_to_current (전류 PID) — servo 변환도 흡수
+    speed_pid = Node(
+        package='vesc_current_control', executable='speed_pid_to_current',
+        name='speed_pid_to_current_node', output='screen',
+        parameters=[{
+            'speed_to_erpm_gain': 3423.0, 'speed_sign': 1.0,
+            'current_sign': _farg('cc_current_sign'),
+            'kp': _farg('cc_kp'), 'ki': _farg('cc_ki'), 'kd': _farg('cc_kd'),
+            'current_max': _farg('cc_current_max'), 'current_min': _farg('cc_current_min'),
+            'max_abs_speed': _farg('cc_max_abs_speed'),
+            # servo 변환 (vesc_config 의 ackermann_to_vesc 값과 동일)
+            'steering_angle_to_servo_gain': 0.5135,
+            'steering_angle_to_servo_offset': 0.445,
+            'servo_max': 0.85, 'servo_min': 0.15,
+        }],
+        condition=IfCondition(use_cc),
     )
     vesc_to_odom = Node(
         package='vesc_ackermann',
@@ -143,9 +180,29 @@ def generate_launch_description():
         DeclareLaunchArgument('joy', default_value='true',
                               description='Start joy_mac/joy_node. false 면 별도 터미널에서 실행.'),
 
+        # ── 전류 PID 제어 토글 (vesc_current_control 필요) ──
+        DeclareLaunchArgument('use_current_control', default_value='false',
+                              description='true=속도 PID→전류(vesc_current_control), false=기존 속도(eRPM).'),
+        # 전류모드 파라미터 (보수적 기본 — 검증 후 레이스용으로 상향). 정수 입력도 float 변환.
+        DeclareLaunchArgument('cc_kp', default_value='3.0'),
+        DeclareLaunchArgument('cc_ki', default_value='6.0'),
+        DeclareLaunchArgument('cc_kd', default_value='0.0'),
+        DeclareLaunchArgument('cc_current_max', default_value='30.0',
+                              description='PID 출력 전류 상한[A]. 레이스시 상향(드라이버 캡 안쪽).'),
+        DeclareLaunchArgument('cc_current_min', default_value='-20.0',
+                              description='PID 출력 전류 하한[A](음수=회생).'),
+        DeclareLaunchArgument('cc_driver_current_min', default_value='-55.0',
+                              description='vesc_driver current_min override(회생, 펌웨어 -60 안쪽).'),
+        DeclareLaunchArgument('cc_driver_current_max', default_value='90.0'),
+        DeclareLaunchArgument('cc_current_sign', default_value='1.0'),
+        DeclareLaunchArgument('cc_max_abs_speed', default_value='12.0',
+                              description='폭주 가드[m/s]. 레이스 최고속 위로.'),
+
         sensor_bringup,
-        vesc_driver_node,
+        vesc_driver_speed,
+        vesc_driver_current,
         ackermann_to_vesc,
+        speed_pid,
         vesc_to_odom,
         joy_node,
         simple_mux,
